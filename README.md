@@ -469,8 +469,8 @@ The complete production workflow can be summarized as:
 ┌──────────────────────────────────────────────────────────────┐
 │                     LIVE INGESTION                           │
 │                                                              │
-│  yfinance → US Equity / ETF Option Chains                   │
-│  Spot + Expirations + Calls + Puts                          │
+│  yfinance → US Equity / ETF Option Chains                    │
+│  Spot + Expirations + Calls + Puts                           │
 └─────────────────────────────┬────────────────────────────────┘
                               │
                               ▼
@@ -503,7 +503,7 @@ The complete production workflow can be summarized as:
 │  • Brent IV inversion                                        │
 │  • Delta / Gamma / Vega / Theta / Rho                        │
 │  • ATM IV extraction                                         │
-│  • Term structure                                             │
+│  • Term structure                                            │
 └─────────────────────────────┬────────────────────────────────┘
                               │
                               ▼
@@ -511,10 +511,10 @@ The complete production workflow can be summarized as:
 │                 SURFACE REGULARIZATION                       │
 │                                                              │
 │  • Duplicate aggregation                                     │
-│  • 50 × 50 grid                                               │
-│  • Cubic griddata interpolation                               │
+│  • 50 × 50 grid                                              │
+│  • Cubic griddata interpolation                              │
 │  • Nearest-neighbor boundary completion                      │
-│  • IV clipping / sanity controls                              │
+│  • IV clipping / sanity controls                             │
 └─────────────────────────────┬────────────────────────────────┘
                               │
                               ▼
@@ -713,8 +713,12 @@ Developed as an institutional-style portfolio demonstration of:
 * Python architecture
 * Interactive quantitative visualization
 
+---
+
 **Developer:** Sudhir
+
 **Project:** VolSurface Pro
+
 **GitHub:** `@spelsudhir`
 
 ---
