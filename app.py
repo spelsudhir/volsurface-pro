@@ -1339,11 +1339,9 @@ with tab4:
 st.markdown(
     """
     <div class="footer-badge">
-        Built by <strong>Quantitative Analytics &amp; Automation Portfolio</strong>
+        <strong>Quantitative Analytics &amp; Automation Portfolio - Sudhir</strong>
         &nbsp;|&nbsp;
-        <a href="https://github.com/" target="_blank">GitHub</a>
-        &nbsp;•&nbsp;
-        <a href="https://linkedin.com/" target="_blank">LinkedIn</a>
+        <a href="https://github.com/spelsudhir/volsurface-pro" target="_blank">GitHub</a>
     </div>
     """,
     unsafe_allow_html=True,
