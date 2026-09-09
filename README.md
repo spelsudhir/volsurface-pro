@@ -153,25 +153,21 @@ VolSurface Pro therefore uses European put-call parity to construct an equivalen
 The parity relationship is:
 
 $$
-C-P=S-Ke^{-rT}
+C - P = S - Ke^{-rT}
 $$
 
 Therefore:
 
-### Synthetic Put
+#### Synthetic Put
 
 $$
-P_{\text{synthetic}}
-=
-C-S+Ke^{-rT}
+P_{\text{synthetic}} = C - S + Ke^{-rT}
 $$
 
-### Synthetic Call
+#### Synthetic Call
 
 $$
-C_{\text{synthetic}}
-=
-P+S-Ke^{-rT}
+C_{\text{synthetic}} = P + S - Ke^{-rT}
 $$
 
 This allows the application to avoid directly inverting unstable deep-ITM quotes while retaining useful strike information.
@@ -300,22 +296,18 @@ $$
 d_2=d_1-\sigma\sqrt{T}
 $$
 
-### European Call
+The Black–Scholes European option formulas are:
+
+#### European Call
 
 $$
-C=
-S\Phi(d_1)
--
-Ke^{-rT}\Phi(d_2)
+C = S\Phi(d_1) - Ke^{-rT}\Phi(d_2)
 $$
 
-### European Put
+#### European Put
 
 $$
-P=
-Ke^{-rT}\Phi(-d_2)
--
-S\Phi(-d_1)
+P = Ke^{-rT}\Phi(-d_2) - S\Phi(-d_1)
 $$
 
 ---
