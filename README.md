@@ -12,6 +12,12 @@ The application combines a **quantitative derivatives engine** with a high-contr
 
 > **Educational / Research Use Only:** VolSurface Pro is intended for quantitative research, portfolio demonstration, and educational purposes. It is not investment advice and should not be used as the sole basis for trading or investment decisions.
 
+<img width="1440" height="900" alt="Screenshot 2026-09-09 at 5 38 14 PM" src="https://github.com/user-attachments/assets/84315d1a-0dc3-474c-ba02-c40386164f48" />
+
+<img width="1440" height="900" alt="Screenshot 2026-09-09 at 5 37 55 PM" src="https://github.com/user-attachments/assets/59ecffb0-9481-4cc7-8f10-09d68501442a" />
+
+<img width="1440" height="900" alt="Screenshot 2026-09-09 at 5 37 48 PM" src="https://github.com/user-attachments/assets/6c9126c3-0312-4176-a29f-9ad4e6bdb03e" />
+
 ---
 
 ## 📌 Overview
