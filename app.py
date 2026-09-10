@@ -6,17 +6,13 @@ An institutional-grade, single-file Streamlit application for building
 implied-volatility surfaces, analytical Greeks, and skew/term-structure
 diagnostics from live US-listed options chains.
 
-Run with:
-    streamlit run app.py
-
-Author: Quantitative Analytics & Automation Portfolio
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import time
 import warnings
-from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import numpy as np
@@ -231,6 +227,104 @@ div[data-testid="stDataFrame"] {
 code, .stCodeBlock {
     font-family: 'Roboto Mono', monospace;
 }
+
+/* Preset ticker button row (sidebar) */
+.preset-row-label {
+    color: #7c8496;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+section[data-testid="stSidebar"] div[data-testid="column"] button {
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+    font-size: 0.78rem !important;
+}
+
+/* Sidebar CTA card */
+.cta-card {
+    background: linear-gradient(160deg, #141926 0%, #0e1119 100%);
+    border: 1px solid #232a3d;
+    border-radius: 12px;
+    padding: 14px 16px 12px 16px;
+    margin-top: 6px;
+}
+.cta-card .cta-title {
+    color: #00FFA3;
+    font-weight: 700;
+    font-size: 0.86rem;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.cta-card .cta-body {
+    color: #9aa2b4;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    margin-bottom: 8px;
+}
+.cta-card .cta-links a {
+    color: #00D4FF;
+    text-decoration: none;
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin-right: 14px;
+}
+.cta-card .cta-links a:hover {
+    text-decoration: underline;
+}
+
+.ticker-header {
+    padding-top: 32px;
+    padding-bottom: 18px;
+    margin-bottom: 14px;
+}
+
+.ticker-title-row {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+}
+
+.ticker-symbol {
+    font-size: 2rem;
+    font-weight: 800;
+    color: #f8fafc;
+    letter-spacing: -0.6px;
+}
+
+.ticker-price {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: #94a3b8;
+}
+
+.ticker-context {
+    margin-top: 6px;
+    font-size: 0.82rem;
+    color: #94a3b8;
+}
+
+.ticker-data-time {
+    margin-top: 9px;
+    font-size: 0.74rem;
+    color: #64748b;
+}
+
+.data-dot {
+    color: #22c55e;
+    font-size: 8px;
+    margin-right: 5px;
+}
+
+.ticker-divider {
+    height: 1px;
+    margin-top: 16px;
+    background: rgba(148, 163, 184, 0.15);
+}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -246,9 +340,87 @@ NEON_GREEN = "#00FFA3"
 ELECTRIC_BLUE = "#00D4FF"
 WARN_RED = "#FF5C7A"
 
+CACHE_TTL_SECONDS = 600
+
 
 # ======================================================================
-# 2. BLACK-SCHOLES-MERTON MATHEMATICAL ENGINE
+# 2. NETWORK RESILIENCE LAYER
+# ======================================================================
+
+try:
+    from curl_cffi import requests as curl_requests  # type: ignore
+
+    _HAS_CURL_CFFI = True
+except ImportError:
+    _HAS_CURL_CFFI = False
+
+
+@st.cache_resource(show_spinner=False)
+def get_http_session():
+    """
+    Build one shared, TLS-impersonating session and reuse it (via
+    `st.cache_resource`, which persists the *object* itself rather than
+    a serialized copy) across the process lifetime.
+
+    Returns a `curl_cffi` session impersonating Chrome if the package is
+    installed, else `None` — signaling callers to let `yfinance` manage
+    its own default session/cookie/crumb handling instead of injecting
+    a plain `requests.Session` that would help nothing.
+
+    This is a defensive measure, not a guarantee: Yahoo's anti-bot
+    behavior can change at any time, so all call sites still treat
+    failures as expected and degrade gracefully.
+    """
+    if not _HAS_CURL_CFFI:
+        return None
+    return curl_requests.Session(impersonate="chrome")
+
+
+def _yf_ticker(ticker: str) -> yf.Ticker:
+    """
+    Construct a `yf.Ticker`, binding it to the shared TLS-impersonating
+    session when available. When `curl_cffi` isn't installed, no custom
+    session is passed at all — yfinance's own internal cookie/crumb
+    cache handles the request, which works better than a plain
+    `requests.Session` that only spoofs headers, not the TLS handshake.
+    """
+    session = get_http_session()
+    if session is not None:
+        return yf.Ticker(ticker, session=session)
+    return yf.Ticker(ticker)
+
+
+def _with_retries(fn, *args, max_attempts: int = 3, base_delay: float = 0.6, **kwargs):
+    """
+    Execute `fn(*args, **kwargs)` with exponential-backoff retries, but
+    ONLY for errors that look transient (rate limits, timeouts, dropped
+    connections). Anything else (bad ticker, parsing errors) is raised
+    immediately so the caller's own try/except can fall back fast
+    instead of stalling the UI for ~4 seconds on a guaranteed failure.
+
+    Time complexity: O(max_attempts) calls to `fn`, each O(cost of fn).
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - intentionally broad, network layer
+            last_exc = exc
+            msg = str(exc).lower()
+            is_transient = any(
+                token in msg
+                for token in ("429", "too many requests", "rate limit", "timeout", "timed out", "connection")
+            )
+            if is_transient and attempt < max_attempts - 1:
+                time.sleep(base_delay * (2 ** attempt))
+                continue
+            break
+    assert last_exc is not None
+    raise last_exc
+
+
+# ======================================================================
+# 3. BLACK-SCHOLES-MERTON MATHEMATICAL ENGINE
 # ======================================================================
 
 class BlackScholesEngine:
@@ -276,18 +448,23 @@ class BlackScholesEngine:
         Annualized volatility (decimal, e.g. 0.20 for 20%).
     """
 
-    _EPS_T = 1e-6
-    _EPS_SIGMA = 1e-6
+    _EPS_T = 0.5 / 365.25
+    _EPS_SIGMA = 1e-4
+    IV_FLOOR = 0.02
+    IV_CEIL = 3.0
 
     # ------------------------------------------------------------------
     @staticmethod
     def _safe_inputs(S, K, T, sigma):
-        """Clip degenerate T / sigma to small positive epsilons.
+        """Clip degenerate T / sigma to small positive floors.
 
         Time complexity: O(n) for array inputs of length n.
         """
         S = np.asarray(S, dtype=float)
         K = np.asarray(K, dtype=float)
+        # DEFENSIVE CHECK: T can never be 0 or negative here, which is
+        # what protects every downstream sqrt(T) / (sigma * sqrt(T))
+        # division from a ZeroDivisionError / RuntimeWarning / inf.
         T = np.maximum(np.asarray(T, dtype=float), BlackScholesEngine._EPS_T)
         sigma = np.maximum(np.asarray(sigma, dtype=float), BlackScholesEngine._EPS_SIGMA)
         return S, K, T, sigma
@@ -339,6 +516,9 @@ class BlackScholesEngine:
             val = K * disc * norm.cdf(-d2) - S * norm.cdf(-d1)
             intrinsic = np.maximum(K_raw - S_raw, 0.0)
         val = np.maximum(val, 0.0)
+        # 0-DTE SAFEGUARD: contracts at/under the tenor floor are priced
+        # at pure intrinsic value, sidestepping any residual numerical
+        # noise from evaluating the BSM formula at a clipped-tiny T.
         at_expiry = T_raw <= cls._EPS_T
         return np.where(at_expiry, intrinsic, val)
 
@@ -355,7 +535,15 @@ class BlackScholesEngine:
     # ------------------------------------------------------------------
     @classmethod
     def gamma(cls, S, K, T, r, sigma):
-        """Gamma: d^2V/dS^2, identical for calls and puts. O(n)."""
+        """
+        Gamma: d^2V/dS^2, identical for calls and puts.
+
+        DEFENSIVE CHECK: the S * sigma * sqrt(T) denominator is the
+        classic Gamma blow-up point at 0-DTE. Both sigma and T are
+        already floored in `_safe_inputs`, and we additionally guard
+        against S == 0 (a delisted/garbage quote) with a final
+        `np.where`. O(n).
+        """
         S, K, T, sigma = cls._safe_inputs(S, K, T, sigma)
         d1, _ = cls._d1_d2(S, K, T, r, sigma)
         denom = S * sigma * np.sqrt(T)
@@ -365,7 +553,14 @@ class BlackScholesEngine:
     # ------------------------------------------------------------------
     @classmethod
     def vega(cls, S, K, T, r, sigma, per_one_pct: bool = True):
-        """Vega: dV/dsigma. Divided by 100 to express per 1% vol move. O(n)."""
+        """
+        Vega: dV/dsigma. Divided by 100 to express per 1% vol move.
+
+        DEFENSIVE CHECK: sqrt(T) here is already floored via
+        `_safe_inputs`, so Vega decays smoothly toward (but never
+        through) zero as expiry approaches instead of vanishing to
+        exactly 0 or NaN. O(n).
+        """
         S, K, T, sigma = cls._safe_inputs(S, K, T, sigma)
         d1, _ = cls._d1_d2(S, K, T, r, sigma)
         raw = S * norm.pdf(d1) * np.sqrt(T)
@@ -434,14 +629,21 @@ class BlackScholesEngine:
         Solve for implied volatility via Brent's method on the root:
             BS_Price(sigma) - Market_Mid_Price = 0
 
-        Returns None if a sign change is not found in [lower, upper]
-        (i.e. the quote violates no-arbitrage bounds implied by the
-        bracket) or if the solver otherwise fails, so callers can
-        gracefully fall back to a broker-reported IV.
+        DEFENSIVE CHECK (deep OTM / degenerate quotes): every failure
+        mode here — a near-zero mid-price, a bracket with no sign
+        change (i.e. the quote sits outside the no-arbitrage bounds
+        implied by [lower, upper]), or the solver simply not
+        converging within `maxiter` — is caught and converted into a
+        clean `None` rather than an exception or a NaN. Callers are
+        expected to fall back to the broker-reported IV, and if that
+        is also unusable, to discard the contract entirely.
 
         Time complexity: O(log(1/tol)) per contract (Brent's method).
         """
-        if market_price is None or market_price <= 0 or T <= 0:
+        # Guard against non-priceable inputs before even calling brentq.
+        if market_price is None or not np.isfinite(market_price) or market_price <= 1e-6:
+            return None
+        if T is None or T <= 0:
             return None
 
         def objective(sigma):
@@ -449,31 +651,35 @@ class BlackScholesEngine:
 
         try:
             f_lower, f_upper = objective(lower), objective(upper)
+            if not (np.isfinite(f_lower) and np.isfinite(f_upper)):
+                return None
             if np.sign(f_lower) == np.sign(f_upper):
                 return None
             iv = brentq(objective, lower, upper, xtol=1e-6, maxiter=200)
-            return float(iv)
+            if not np.isfinite(iv):
+                return None
+            return float(np.clip(iv, cls.IV_FLOOR, cls.IV_CEIL))
         except (ValueError, RuntimeError):
             return None
 
 
 # ======================================================================
-# 3. DATA PIPELINE (DEFENSIVE INGESTION)
+# 4. DATA PIPELINE (DEFENSIVE INGESTION)
 # ======================================================================
 
 RISK_FREE_PROXY_TICKER = "^IRX"  # 13-week T-bill discount rate
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def fetch_risk_free_rate() -> float:
     """
     Pull the latest 13-week US T-bill yield (^IRX) as a risk-free rate
-    proxy. Falls back to 4.5% if the fetch fails for any reason.
+    proxy. Falls back to 4.5% if the fetch fails for any reason
+    (including exhausted retries on a transient/429 error).
     """
     try:
-        tbill = yf.Ticker(RISK_FREE_PROXY_TICKER)
-        hist = tbill.history(period="5d")
-        if hist.empty:
+        hist = _with_retries(lambda: _yf_ticker(RISK_FREE_PROXY_TICKER).history(period="5d"))
+        if hist is None or hist.empty:
             return 4.5
         latest = float(hist["Close"].dropna().iloc[-1])
         if latest <= 0 or latest > 20:
@@ -483,21 +689,21 @@ def fetch_risk_free_rate() -> float:
         return 4.5
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def fetch_spot_and_change(ticker: str) -> Tuple[Optional[float], Optional[float]]:
     """
     Fetch the latest spot price and daily percent change for `ticker`.
-    Returns (None, None) if the ticker is invalid or data is unavailable.
+    Returns (None, None) if the ticker is invalid, the network call
+    fails, or data is unavailable after retries — never raises.
     """
     try:
-        tk = yf.Ticker(ticker)
-        hist = tk.history(period="5d")
-        if hist.empty or len(hist) < 1:
+        hist = _with_retries(lambda: _yf_ticker(ticker).history(period="5d"))
+        if hist is None or hist.empty or len(hist) < 1:
             return None, None
         last_close = float(hist["Close"].iloc[-1])
         if len(hist) >= 2:
             prev_close = float(hist["Close"].iloc[-2])
-            pct_change = (last_close - prev_close) / prev_close * 100.0
+            pct_change = (last_close - prev_close) / prev_close * 100.0 if prev_close else 0.0
         else:
             pct_change = 0.0
         return last_close, pct_change
@@ -505,15 +711,16 @@ def fetch_spot_and_change(ticker: str) -> Tuple[Optional[float], Optional[float]
         return None, None
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def fetch_ticker_info(ticker: str) -> dict:
     """
     Fetch descriptive context (name, exchange, sector, 52-week range) for
     the header strip. Best-effort — returns an empty dict on any failure
-    so the app degrades to showing only the ticker symbol.
+    (including retries exhausted) so the app degrades to showing only
+    the ticker symbol instead of crashing the header render.
     """
     try:
-        info = yf.Ticker(ticker).info or {}
+        info = _with_retries(lambda: _yf_ticker(ticker).info) or {}
         return {
             "name": info.get("longName") or info.get("shortName"),
             "exchange": info.get("exchange"),
@@ -525,22 +732,20 @@ def fetch_ticker_info(ticker: str) -> dict:
         return {}
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def fetch_expirations(ticker: str) -> Tuple[str, ...]:
     """Return the tuple of available option expiration date strings."""
     try:
-        tk = yf.Ticker(ticker)
-        return tuple(tk.options)
+        return tuple(_with_retries(lambda: _yf_ticker(ticker).options))
     except Exception:
         return tuple()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def fetch_option_chain_for_expiry(ticker: str, expiry: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Fetch raw call and put chains for a single expiry. May return empty frames."""
     try:
-        tk = yf.Ticker(ticker)
-        chain = tk.option_chain(expiry)
+        chain = _with_retries(lambda: _yf_ticker(ticker).option_chain(expiry))
         return chain.calls.copy(), chain.puts.copy()
     except Exception:
         return pd.DataFrame(), pd.DataFrame()
@@ -624,8 +829,11 @@ def _clean_and_enrich(
         return pd.DataFrame(), funnel
     today = dt.date.today()
     dte = (exp_date - today).days
-    tenor_years = dte / 365.25
-    if tenor_years < (1.0 / 365.25):
+    # 0-DTE SAFEGUARD: floor the tenor used downstream at half a day
+    # (in years) rather than letting same-day-expiry contracts pass a
+    # near-zero tenor into sqrt(T) denominators later in the pipeline.
+    tenor_years = max(dte / 365.25, BlackScholesEngine._EPS_T)
+    if dte < 0:
         return pd.DataFrame(), funnel
 
     df["expiry"] = expiry
@@ -633,7 +841,9 @@ def _clean_and_enrich(
     df["tenor"] = tenor_years
     df["moneyness"] = df["strike"] / spot
 
-    # --- Implied Volatility: recompute via Brent, fallback to yfinance
+    # --- Implied Volatility: recompute via Brent, fallback to yfinance,
+    # then clip into the realistic tradable band so a single bad quote
+    # (deep OTM, stale, arbitrage-violating) can never spike the mesh.
     def _resolve_iv(row):
         solved = BlackScholesEngine.implied_vol(
             market_price=row["mid"],
@@ -643,15 +853,19 @@ def _clean_and_enrich(
             r=r,
             option_type=option_type,
         )
-        if solved is not None and 0.01 < solved <= 3.0:
-            return solved
+        if solved is not None:
+            return solved  # already clipped inside implied_vol()
         fallback = row.get("impliedVolatility", np.nan)
-        if pd.notna(fallback) and 0.01 < fallback <= 3.0:
-            return float(fallback)
+        if pd.notna(fallback) and fallback > 0:
+            return float(np.clip(fallback, BlackScholesEngine.IV_FLOOR, BlackScholesEngine.IV_CEIL))
         return np.nan
 
     df["iv"] = df.apply(_resolve_iv, axis=1)
-    df = df[df["iv"].notna() & (df["iv"] > 0.01) & (df["iv"] <= 3.0)].copy()
+    df = df[df["iv"].notna()].copy()
+    # Final clamp (belt-and-suspenders): guarantees every IV value that
+    # reaches the surface/heatmap renderers sits inside [2%, 300%],
+    # regardless of which code path produced it.
+    df["iv"] = np.clip(df["iv"], BlackScholesEngine.IV_FLOOR, BlackScholesEngine.IV_CEIL)
     funnel["iv_ok"] = len(df)
     if df.empty:
         return df, funnel
@@ -672,7 +886,7 @@ def _clean_and_enrich(
     return df[keep_cols].reset_index(drop=True), funnel
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def build_clean_chain(
     ticker: str,
     max_dte: int,
@@ -686,6 +900,12 @@ def build_clean_chain(
     diagnostics), where diagnostics is a {"call": funnel, "put": funnel}
     dict of cleaning-stage row counts, summed across all expirations, so
     a caller can see exactly where one leg (e.g. calls) got filtered out.
+
+    TENOR-SCOPED FETCHING: expirations are filtered against `max_dte`
+    BEFORE any per-expiry chain is requested, so tightening the tenor
+    slider directly shrinks the number of live network calls made (not
+    just the number of rows kept afterward) — this is what keeps a
+    180-day default fast instead of pulling all 30+ listed expiries.
 
     Time complexity: O(E * C) where E = number of expirations within
     the tenor horizon and C = average contracts per expiry.
@@ -708,7 +928,10 @@ def build_clean_chain(
         except ValueError:
             continue
         dte = (exp_date - today).days
-        if 0 < dte <= max_dte:
+        # Only expirations inside the user-selected horizon are ever
+        # fetched — this is the tenor-scoped fetch restriction requested
+        # to keep load times fast versus pulling the entire chain.
+        if 0 <= dte <= max_dte:
             valid_expirations.append(exp)
 
     frames = []
@@ -742,7 +965,7 @@ def build_clean_chain(
 
 
 # ======================================================================
-# 4. VOLATILITY SURFACE INTERPOLATION
+# 5. VOLATILITY SURFACE INTERPOLATION
 # ======================================================================
 
 def build_iv_surface_grid(
@@ -776,7 +999,11 @@ def build_iv_surface_grid(
         Z_cubic = interpolate.griddata(points, z_vals, (X, Y), method="cubic")
         Z_nearest = interpolate.griddata(points, z_vals, (X, Y), method="nearest")
         Z = np.where(np.isnan(Z_cubic), Z_nearest, Z_cubic)
-        Z = np.clip(Z, 0.5, 300.0)
+        # EXTREME MONEYNESS CLAMP: cubic interpolation can ring/overshoot
+        # near sparse edges of the grid (e.g. far deep-OTM strikes); clip
+        # the interpolated mesh into the same realistic IV band used for
+        # raw quotes so the 3D surface never shows an unphysical spike.
+        Z = np.clip(Z, BlackScholesEngine.IV_FLOOR * 100.0, BlackScholesEngine.IV_CEIL * 100.0)
         return X, Y, Z
     except Exception:
         return None, None, None
@@ -830,23 +1057,61 @@ def compute_skew_index(df: pd.DataFrame, target_dte: int = 30) -> Optional[float
 
 
 # ======================================================================
-# 5. SIDEBAR CONTROLS
+# 6. TICKER STATE & PRESET BUTTONS
+# ======================================================================
+
+PRESET_TICKERS = [
+    {"symbol": "SPY", "label": "SPY", "hint": "S&P 500 Index — clean institutional skew"},
+    {"symbol": "NVDA", "label": "NVDA", "hint": "High-beta tech — earnings volatility dynamic"},
+    {"symbol": "TSLA", "label": "TSLA", "hint": "Steep skew"},
+    {"symbol": "AAPL", "label": "AAPL", "hint": "Mega-cap benchmark"},
+]
+
+if "active_ticker" not in st.session_state:
+    st.session_state.active_ticker = "SPY"
+
+
+# ======================================================================
+# 7. SIDEBAR CONTROLS
 # ======================================================================
 
 st.sidebar.markdown("## :material/tune: Controls")
 st.sidebar.markdown("---")
 
-quick_pick = st.sidebar.radio(
-    "Quick Select",
-    options=["Custom", "SPY", "AAPL", "NVDA", "TSLA", "QQQ"],
-    horizontal=True,
-    index=1,
+st.sidebar.markdown(
+    '<div class="preset-row-label">Quick Load</div>',
+    unsafe_allow_html=True,
 )
-default_ticker = "SPY" if quick_pick == "Custom" else quick_pick
-ticker_input = st.sidebar.text_input("Ticker Symbol", value=default_ticker).strip().upper()
+
+for row in range(0, len(PRESET_TICKERS), 2):
+    cols = st.sidebar.columns(2)
+
+    for col_idx, preset in enumerate(PRESET_TICKERS[row:row + 2]):
+        with cols[col_idx]:
+            if st.button(
+                preset["label"],
+                help=preset["hint"],
+                use_container_width=True,
+                key=f"preset_btn_{preset['symbol']}",
+            ):
+                st.session_state.active_ticker = preset["symbol"]
+                st.session_state.ticker_text_input = preset["symbol"]
+                st.rerun()
+
+ticker_input = st.sidebar.text_input(
+    "Ticker Symbol",
+    value=st.session_state.active_ticker,
+    key="ticker_text_input",
+).strip().upper()
+
+if ticker_input:
+    st.session_state.active_ticker = ticker_input
 
 fetch_clicked = st.sidebar.button(
-    "Instant Fetch", icon=":material/sync:", use_container_width=True, type="primary"
+    "Instant Fetch",
+    icon=":material/sync:",
+    use_container_width=True,
+    type="primary",
 )
 
 st.sidebar.markdown("---")
@@ -867,6 +1132,7 @@ option_scope = st.sidebar.selectbox(
 max_dte = st.sidebar.slider(
     "Tenor Horizon (Days to Expiration)",
     min_value=7, max_value=365, value=180, step=1,
+    help="Only expirations inside this horizon are fetched from Yahoo Finance — narrowing this speeds up every load.",
 )
 
 require_liquidity = st.sidebar.checkbox(
@@ -879,8 +1145,8 @@ st.sidebar.markdown("---")
 
 render_mode = st.sidebar.radio(
     "Surface Rendering",
-    options=["2D Contour", "3D Surface (WebGL)"],
-    index=0,
+    options=["2D Contour", "3D Surface"],
+    index=1,
 )
 x_axis_mode = st.sidebar.selectbox("Surface X-Axis", ["Strike ($)", "Moneyness (K/S)"], index=1)
 y_axis_mode = st.sidebar.selectbox("Surface Y-Axis", ["Tenor (Years)", "DTE (Days)"], index=1)
@@ -892,11 +1158,34 @@ if st.sidebar.button("Clear Cache", icon=":material/delete_sweep:", use_containe
     st.sidebar.success("Cache cleared.", icon=":material/check_circle:")
 
 st.sidebar.markdown("---")
-st.sidebar.caption(":material/database: Yahoo Finance via `yfinance` · delayed quotes")
+_network_mode = "TLS-impersonated (curl_cffi)" if _HAS_CURL_CFFI else "yfinance default session"
+st.sidebar.caption(
+    f":material/database: Yahoo Finance via `yfinance` · delayed quotes · "
+    f"cached {CACHE_TTL_SECONDS // 60} min · {_network_mode}"
+)
+if not _HAS_CURL_CFFI:
+    st.sidebar.caption(
+        ":material/info: Add `curl_cffi` to requirements.txt for stronger 429 resistance."
+    )
+
+# --- Sidebar CTA / developer-identity card -----------------------------
+st.sidebar.markdown(
+    """
+    <div class="cta-card">
+        <div class="cta-title"><span class="icon-glyph" style="font-size:2rem;">bolt</span> Quantitative Analytics &amp; Backtesting Engine</div>
+        <div class="cta-body">Available for custom FinTech dashboards, Python automation, and API development — built and shipped end-to-end, like this one.</div>
+        <div class="cta-links">
+            <a href="https://github.com/spelsudhir/" target="_blank">GitHub &rarr;</a>
+            <a href="mailto:spelsudhir@gmail.com" target="_blank">Contact &rarr;</a>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # ======================================================================
-# 6. MAIN APP HEADER
+# 8. MAIN APP HEADER
 # ======================================================================
 
 st.markdown(
@@ -911,10 +1200,15 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.markdown("---")
+
+# --- Active ticker (set via sidebar preset buttons or text input) -----
+ticker_input = st.session_state.active_ticker
 
 if not ticker_input:
-    st.warning("Enter a ticker symbol in the sidebar to begin.", icon=":material/search:")
+    st.warning(
+        "Enter a ticker symbol in the sidebar to begin.",
+        icon=":material/search:",
+    )
     st.stop()
 
 with st.spinner(f"Fetching and cleaning options chain for {ticker_input}..."):
@@ -927,24 +1221,67 @@ with st.spinner(f"Fetching and cleaning options chain for {ticker_input}..."):
     )
 
 if spot_price == 0.0 or spot_price is None:
-    st.error(f"No market data found for '{ticker_input}'. Check the ticker and try again.", icon=":material/error:")
+    st.warning(
+        f"Couldn't load market data for **{ticker_input}**. This usually means either the "
+        "ticker is invalid, or Yahoo Finance is temporarily rate-limiting requests from this "
+        "server. Double-check the symbol, or wait a moment and click **Instant Fetch** again.",
+        icon=":material/error:",
+    )
     st.stop()
 
+
+# ---------------------------------------------------------
+# Fetch ticker information BEFORE using ticker_info
+# ---------------------------------------------------------
 spot, daily_change = fetch_spot_and_change(ticker_input)
 ticker_info = fetch_ticker_info(ticker_input)
 
+
+# ---------------------------------------------------------
+# Market data header
+# ---------------------------------------------------------
+from datetime import datetime
+
+data_timestamp = datetime.now().astimezone()
+
+data_date = data_timestamp.strftime("%d %b %Y")
+data_time = data_timestamp.strftime("%I:%M:%S %p %Z")
+
+
+context_bits = []
+
 if ticker_info.get("name"):
-    context_bits = [f"<b>{ticker_info['name']}</b>"]
-    if ticker_info.get("exchange"):
-        context_bits.append(ticker_info["exchange"])
-    if ticker_info.get("sector"):
-        context_bits.append(ticker_info["sector"])
-    if ticker_info.get("week52_low") and ticker_info.get("week52_high"):
-        context_bits.append(f"52W Range ${ticker_info['week52_low']:.2f} – ${ticker_info['week52_high']:.2f}")
-    st.markdown(
-        f'<div class="ticker-context">{" &nbsp;·&nbsp; ".join(context_bits)}</div>',
-        unsafe_allow_html=True,
+    context_bits.append(f"<b>{ticker_info['name']}</b>")
+
+if ticker_info.get("exchange"):
+    context_bits.append(ticker_info["exchange"])
+
+if ticker_info.get("sector"):
+    context_bits.append(ticker_info["sector"])
+
+if ticker_info.get("week52_low") and ticker_info.get("week52_high"):
+    context_bits.append(
+        f"52W Range ${ticker_info['week52_low']:.2f} – "
+        f"${ticker_info['week52_high']:.2f}"
     )
+
+st.markdown(
+    f'<div class="ticker-header">'
+    f'<div class="ticker-title-row">'
+    f'<span class="ticker-symbol">{ticker_input}</span>'
+    f'<span class="ticker-price">${spot:,.2f}</span>'
+    f'</div>'
+    f'<div class="ticker-context">'
+    f'{" &nbsp;·&nbsp; ".join(context_bits)}'
+    f'</div>'
+    f'<div class="ticker-data-time">'
+    f'<span class="data-dot">●</span>'
+    f'Data as of {data_date} · {data_time}'
+    f'</div>'
+    f'<div class="ticker-divider"></div>'
+    f'</div>',
+    unsafe_allow_html=True,
+)
 
 # --- Data pipeline diagnostics: per-leg filter funnel.
 with st.expander("Data Pipeline Diagnostics — per-leg filter funnel", icon=":material/troubleshoot:"):
@@ -971,7 +1308,7 @@ if clean_df.empty:
 
 
 # ======================================================================
-# 7. KPI METRIC CARDS
+# 9. KPI METRIC CARDS
 # ======================================================================
 
 atm_iv_30d = compute_atm_iv(clean_df, target_dte=30)
@@ -1051,7 +1388,7 @@ st.markdown("---")
 
 
 # ======================================================================
-# 8. TABS
+# 10. TABS
 # ======================================================================
 
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -1077,6 +1414,9 @@ with tab1:
                 x=X, y=Y, z=Z,
                 colorscale="Viridis",
                 opacity=0.92,
+                # CONVERSION UPGRADE: bottom-plane projected contours make
+                # the volatility smile/skew scannable from directly above
+                # the surface, not just from a tilted 3D angle.
                 contours={
                     "z": {"show": True, "usecolormap": True, "project_z": True}
                 },
@@ -1122,7 +1462,7 @@ with tab1:
             title=f"{ticker_input} Implied Volatility Surface",
         )
         st.plotly_chart(fig_surface, use_container_width=True)
-        st.caption("50×50 grid · `scipy.interpolate.griddata` (cubic, nearest-neighbor fallback)")
+        st.caption("50×50 grid · `scipy.interpolate.griddata` (cubic, nearest-neighbor fallback) · IV clamped to [2%, 300%]")
     else:
         # --- 2D Contour: same interpolated grid, rendered with Plotly's
         # --- SVG/canvas Contour trace instead of a WebGL Surface.
@@ -1170,7 +1510,7 @@ with tab1:
             title=f"{ticker_input} Implied Volatility Surface — 2D Contour",
         )
         st.plotly_chart(fig_contour, use_container_width=True)
-        st.caption("50×50 grid · `scipy.interpolate.griddata` (cubic, nearest-neighbor fallback)")
+        st.caption("50×50 grid · `scipy.interpolate.griddata` (cubic, nearest-neighbor fallback) · IV clamped to [2%, 300%]")
 
 # ----------------------------------------------------------------------
 # TAB 2: SMILE & TERM STRUCTURE
@@ -1318,12 +1658,14 @@ with tab4:
 
     csv_bytes = clean_df.to_csv(index=False).encode("utf-8")
     st.download_button(
-        label="⬇️ Download Options Chain as CSV",
-        data=csv_bytes,
-        file_name=f"{ticker_input}_clean_options_chain_{dt.date.today().isoformat()}.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+    label="Download Options Chain as CSV",
+    icon=":material/download:",
+    data=csv_bytes,
+    file_name=f"{ticker_input}_options_chain_{dt.date.today().isoformat()}.csv",
+    mime="text/csv",
+    use_container_width=True,
+)
+
 
     st.caption(
         f"{filtered_count:,} liquid, arbitrage-screened contracts kept out of "
@@ -1333,15 +1675,15 @@ with tab4:
 
 
 # ======================================================================
-# 9. FOOTER
+# 11. FOOTER
 # ======================================================================
 
 st.markdown(
     """
     <div class="footer-badge">
-        <strong>Quantitative Analytics &amp; Automation Portfolio - Sudhir</strong>
+        <strong>Quantitative Analytics &amp; Automation Portfolio |</strong> Built by - Sudhir
         &nbsp;|&nbsp;
-        <a href="https://github.com/spelsudhir/volsurface-pro" target="_blank">GitHub</a>
+        <a href="https://github.com/spelsudhir/" target="_blank">GitHub</a>
     </div>
     """,
     unsafe_allow_html=True,
