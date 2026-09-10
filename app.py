@@ -1680,8 +1680,10 @@ with tab4:
 
 st.markdown(
     """
-    <div class="footer-badge">
-        <strong>Quantitative Analytics &amp; Automation Portfolio |</strong> Built by - Sudhir
+   <div class="footer-badge">
+        Built by - Sudhir
+        &nbsp;|&nbsp; 
+        <strong>Quantitative Analytics &amp; Automation Portfolio</strong>
         &nbsp;|&nbsp;
         <a href="https://github.com/spelsudhir/" target="_blank">GitHub</a>
     </div>
