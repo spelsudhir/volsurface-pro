@@ -28,27 +28,20 @@ warnings.filterwarnings("ignore")
 
 hide_st_style = """
 <style>
-    /* Hide Main Menu */
     #MainMenu {
-        display: none !important;
+        display: none;
     }
 
-    /* Hide footer */
     footer {
-        display: none !important;
+        display: none;
     }
 
-    /* Keep header for sidebar collapse button */
     header {
         background: transparent !important;
+        height: 0px !important;
     }
 
-    /* Hide Deploy button */
-    [data-testid="stAppDeployButton"] {
-        display: none !important;
-    }
-
-    /* Keep sidebar collapse/expand button */
+    /* Preserve sidebar collapse/expand button */
     [data-testid="stSidebarCollapseButton"] {
         display: flex !important;
         visibility: visible !important;
