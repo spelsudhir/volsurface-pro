@@ -27,12 +27,36 @@ from scipy.stats import norm
 warnings.filterwarnings("ignore")
 
 hide_st_style = """
-            <style>
-            #MainMenu {visibility: hidden;}
-            footer {visibility: hidden;}
-            header {visibility: hidden;}
-            </style>
-            """
+<style>
+    /* Hide Main Menu */
+    #MainMenu {
+        display: none !important;
+    }
+
+    /* Hide footer */
+    footer {
+        display: none !important;
+    }
+
+    /* Keep header for sidebar collapse button */
+    header {
+        background: transparent !important;
+    }
+
+    /* Hide Deploy button */
+    [data-testid="stAppDeployButton"] {
+        display: none !important;
+    }
+
+    /* Keep sidebar collapse/expand button */
+    [data-testid="stSidebarCollapseButton"] {
+        display: flex !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+    }
+</style>
+"""
+
 st.markdown(hide_st_style, unsafe_allow_html=True)
 
 # ======================================================================
