@@ -26,32 +26,6 @@ from scipy.stats import norm
 
 warnings.filterwarnings("ignore")
 
-hide_st_style = """
-<style>
-    #MainMenu {
-        display: none;
-    }
-
-    footer {
-        display: none;
-    }
-
-    header {
-        background: transparent !important;
-        height: 0px !important;
-    }
-
-    /* Preserve sidebar collapse/expand button */
-    [data-testid="stSidebarCollapseButton"] {
-        display: flex !important;
-        visibility: visible !important;
-        opacity: 1 !important;
-    }
-</style>
-"""
-
-st.markdown(hide_st_style, unsafe_allow_html=True)
-
 # ======================================================================
 # 1. PAGE CONFIG & GLOBAL STYLING
 # ======================================================================
